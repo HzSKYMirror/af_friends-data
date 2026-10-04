@@ -487,7 +487,7 @@ jobs:
             }
 
             // ── Auto-merge for modified entries that pass ───────
-            if (relevant.length === 1 && relevant[0].status === 'modified' && allOk) {
+            if (relevant.length === 1 && relevant[0].status === 'modified' && primary.kind === 'sponsor' && allOk) {
               try {
                 const { execSync } = require('child_process');
                 execSync(`gh api /repos/${owner}/${repo}/pulls/${pull_number}/merge --method PUT --input -`, {
@@ -659,9 +659,9 @@ jobs:
             const H = require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/pr-helpers.js`);
             const {
               DIRS, LABELS, SHARED_MSG, FLOW_MSG,
-              buildFooter,
+              bidirNotFoundMsg, buildFooter,
               isNonEmptyString, parseJsonSafe, normalizeUrl,
-              verifyBacklink,
+              extractTitle, verifyBacklink, formatBacklinkDebug,
               validateEntry, checkUrlReachability,
             } = H;
 
@@ -1014,53 +1014,97 @@ jobs:
               return;
             }
 
-            // ── Backlink verification (friend PR with backlink) ─
-            if (primary.kind === 'friend' && isNonEmptyString(primary.data.backlink) && siteBase) {
+            // Every friend entry must pass backlink verification for this head SHA.
+              if (primary.kind === 'friend') {
+                if (!siteBase) {
+                  await createComment(MSG.SITE_CONFIG_MISSING);
+                  return;
+                }
               const expected = siteBase.replace(/\/$/, '');
+              const backlink = primary.data.backlink;
 
+              // No backlink — instruct the user
+              if (!isNonEmptyString(backlink)) {
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                await createComment(FLOW_MSG.triage.BIDIR_INSTRUCTIONS(siteBase));
+                return;
+              }
+
+              // Validate backlink URL
               let backlinkUrl;
               try {
-                backlinkUrl = new URL(primary.data.backlink).toString();
+                backlinkUrl = new URL(backlink).toString();
               } catch {
-                core.info(`Invalid backlink URL in verify: ${primary.data.backlink}`);
-                backlinkUrl = null;
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                await createComment(`${MSG.BIDIR_BACKLINK_INVALID}（${backlink}）`);
+                return;
+              }
+              if (!backlinkUrl.startsWith('http://') && !backlinkUrl.startsWith('https://')) {
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                await createComment(`${MSG.BIDIR_BACKLINK_NOT_HTTP}（${backlink}）`);
+                return;
               }
 
-              if (backlinkUrl) {
-                // Host consistency check (was missing in the old verify_and_merge)
-                let siteUrlObj;
-                try {
-                  siteUrlObj = new URL(siteUrl);
-                } catch {
-                  siteUrlObj = null;
-                }
-
-                if (siteUrlObj) {
-                  const backlinkHost = new URL(backlinkUrl).host.toLowerCase();
-                  const siteHost = siteUrlObj.host.toLowerCase();
-                  if (backlinkHost !== siteHost) {
-                    core.warning(
-                      `Backlink host mismatch in verify: ${backlinkHost} vs ${siteHost} — skipping backlink check`
-                    );
-                    backlinkUrl = null;
-                  }
-                }
-
-                if (backlinkUrl) {
-                  const fetched = await checkUrlReachability(backlinkUrl);
-                  if (fetched.ok) {
-                    const html = fetched.body || '';
-                    const result = verifyBacklink(html, expected);
-                    if (result.found) {
-                      await setLabels({ addLabels: [LABELS.BIDIR_OK], removeLabels: [LABELS.BIDIR] });
-                    } else {
-                      core.info('Backlink page accessible but expected link not found');
-                    }
-                  } else {
-                    core.info(`Backlink fetch failed in verify: ${fetched.status || fetched.error}`);
-                  }
-                }
+              // Host consistency check
+              let siteUrlObj;
+              try {
+                siteUrlObj = new URL(siteUrl);
+              } catch {
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                await createComment(MSG.BIDIR_SITE_INVALID);
+                return;
               }
+              const backlinkHost = new URL(backlinkUrl).host.toLowerCase();
+              const siteHost = siteUrlObj.host.toLowerCase();
+              if (backlinkHost !== siteHost) {
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                await createComment(
+                  [MSG.BIDIR_HOST_MISMATCH, '', `url：${siteUrlObj.toString()}`, `backlink：${backlinkUrl}`].join('\n')
+                );
+                return;
+              }
+
+              // Fetch backlink page
+              const fetched = await checkUrlReachability(backlinkUrl);
+              if (!fetched.ok) {
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                await createComment(
+                  [
+                    `${MSG.BIDIR_ACCESS_FAIL}（状态码：${fetched.status || fetched.error || 'unknown'}）。`,
+                    '',
+                    `backlink：${backlinkUrl}`,
+                    formatBacklinkDebug({
+                      finalUrl: fetched.finalUrl,
+                      status: fetched.status,
+                    }),
+                  ].join('\n')
+                );
+                return;
+              }
+
+              // Verify the backlink content
+              const html = fetched.body || '';
+              const result = verifyBacklink(html, expected);
+
+              if (!result.found) {
+                await setLabels({ addLabels: [LABELS.BIDIR], removeLabels: [LABELS.BIDIR_OK] });
+                const debugInfo = {
+                  finalUrl: fetched.finalUrl,
+                  status: fetched.status,
+                  contentType: fetched.contentType,
+                  title: extractTitle(html),
+                  foundLinksCount: result.links.length,
+                  sampleLinks: result.links.slice(0, 5).join(', '),
+                };
+                await createComment(
+                  bidirNotFoundMsg(siteBase, backlinkUrl) +
+                    formatBacklinkDebug(debugInfo) +
+                    '\n\n请添加后 push 更新（无需评论）。'
+                );
+                return;
+              }
+
+              await setLabels({ addLabels: [LABELS.BIDIR_OK], removeLabels: [LABELS.BIDIR] });
             }
 
             // ── Merge ───────────────────────────────────────────
