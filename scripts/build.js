@@ -19,7 +19,7 @@ const DATA_SPONSORS = path.join(ROOT, 'data', 'sponsors');
 const IMG_SPONSORS = path.join(ROOT, 'data', 'sponsors-img');
 
 /** Domain used to resolve relative avatar paths in output */
-const DOMAIN = 'https://raw-fas.2x.nz';
+const DOMAIN = 'https://raw-fas.acofork.com';
 
 function isNonEmptyString(v) { return typeof v === 'string' && v.trim().length > 0; }
 function isNullOrString(v)   { return v === null || typeof v === 'string'; }
@@ -44,7 +44,7 @@ function resolveAvatar(avatar) {
 }
 
 function loadAndValidate(dir, label, rules) {
-  if (!fs.existsSync(dir)) { console.warn(`⚠️  ${dir} not found`); return []; }
+  if (!fs.existsSync(dir)) throw new Error(`${label} directory missing: ${dir}`);
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
   const result = [];
   for (const f of files) {
@@ -59,6 +59,9 @@ function loadAndValidate(dir, label, rules) {
     } catch (e) { console.error(`  ❌ ${f}: ${e.message}`); }
   }
   console.log(`   → ${result.length}/${files.length} ${label} loaded`);
+  if (result.length !== files.length) {
+    throw new Error(`${label} validation failed; existing output has not been changed`);
+  }
   return result;
 }
 
